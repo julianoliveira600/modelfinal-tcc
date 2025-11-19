@@ -6,29 +6,30 @@ from PIL import Image
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import os # Importar 'os' para checagem de arquivo
+import os 
 
 # --- 1. Carregar o Modelo ---
 @st.cache_resource
 def carrega_modelo():
     """Baixa o modelo do GDrive e o carrega na memória."""
     
-    #https://drive.google.com/file/d/1ZunVB45Rxqma-QfQoASyQ-52TErIuErH/view?usp=drive_link
+    # URL do modelo TFLite (quantizado Float16)
     url = 'https://drive.google.com/uc?id=1ZunVB45Rxqma-QfQoASyQ-52TErIuErH'
     output_path = 'TCC_modelo_quantizado_float16.tflite'
     
     # Baixar se não existir
     if not os.path.exists(output_path):
-        st.write("Baixando modelo do Google Drive (só na primeira vez)...")
+        st.info("Baixando modelo do Google Drive (só na primeira vez)...")
         gdown.download(url, output_path, quiet=False)
-        st.write("Download concluído.")
+        st.success("Download concluído.")
     
     # Carregar o interpretador TFLite
     interpreter = tf.lite.Interpreter(model_path=output_path)
     interpreter.allocate_tensors()
     return interpreter
 
-# --- 2. Carregar e Pré-processar a Imagem (Com a lógica correta) ---
+# --- 2. Carregar e Pré-processar a Imagem (CORRIGIDA) ---
+# Esta função foi ajustada para garantir a normalização InceptionV3 correta (para [-1, 1])
 def carrega_e_prepara_imagem(interpreter):
     """Lida com o upload e o pré-processamento da imagem."""
     
@@ -42,35 +43,32 @@ def carrega_e_prepara_imagem(interpreter):
         if image_pil.mode == 'RGBA':
             image_pil = image_pil.convert('RGB')
 
-        # --- Início da Lógica de Correção Final ---
-        # Seguindo EXATAMENTE a lógica do seu Colab que funcionou
+        # --- Lógica de Pré-processamento CORRIGIDA ---
+        
+        # 1. Converter a imagem PIL para um Tensor (dtype=float32)
+        image_tensor = tf.convert_to_tensor(np.array(image_pil), dtype=tf.float32)
 
-        # 1. Redimensionar para (256, 256)
-        image_resized = image_pil.resize((256, 256))
+        # 2. Redimensionar para (256, 256) (Usando TF para consistência)
+        image_resized = tf.image.resize(image_tensor, (256, 256))
 
-        # 2. Converter para Array 3D (256, 256, 3)
-        image_array = np.array(image_resized, dtype=np.float32)
+        # 3. Aplicar o pré-processamento InceptionV3
+        # Converte os pixels de [0, 255] para [-1, 1] (normalização exigida)
+        image_preprocessed = tf.keras.applications.inception_v3.preprocess_input(image_resized)
 
-        # 3. Aplicar o pré-processamento InceptionV3 no Array 3D
-        # Converte os pixels de [0, 255] para [-1, 1]
-        image_preprocessed = tf.keras.applications.inception_v3.preprocess_input(image_array)
+        # 4. Adicionar a dimensão do "lote" (batch) e converter para Array NumPy
+        image_batch = np.expand_dims(image_preprocessed.numpy(), axis=0)
 
-        # 4. Adicionar a dimensão do "lote" (batch) para criar o Array 4D
-        image_batch = np.expand_dims(image_preprocessed, axis=0)
-
-        # 5. Garantir o tipo de dado final (float16)
+        # 5. Garantir o tipo de dado final (Float16)
         input_details = interpreter.get_input_details()
         input_dtype = input_details[0]['dtype']
         
-        if input_dtype == np.float16:
-            image_final = image_batch.astype(np.float16)
-        else:
-            image_final = image_batch
+        # Faz a conversão final para o dtype exigido pelo modelo (np.float16)
+        image_final = image_batch.astype(input_dtype)
         
         # --- Fim da Lógica de Correção ---
 
         st.image(image_pil, caption="Imagem Enviada", width=256)
-        st.success('Imagem foi carregada e processada com sucesso')
+        st.success(f'Imagem carregada, processada e convertida para {input_dtype} com sucesso.')
         return image_final
     
     return None
@@ -94,7 +92,7 @@ def previsao(interpreter, image):
     df['probabilidades (%)'] = (100 * output_data[0]).round(2)
 
     fig = px.bar(df, y='classes', x='probabilidades (%)', orientation='h', 
-                 text='probabilidades (%)', title='Probabilidade de Câncer Mamário')
+                  text='probabilidades (%)', title='Probabilidade de Câncer Mamário')
     fig.update_traces(textposition='outside')
     st.plotly_chart(fig)
 
@@ -108,17 +106,20 @@ def main():
     st.title("🔬 Classificador de Câncer Mamário em Animais")
     st.write("""
     Este aplicativo utiliza um modelo de Deep Learning (InceptionV3) 
-    para classificar se uma imagem histopatológica indica um tumor 
-    Benigno ou Maligno.
+    quantizado (Float16) para classificar se uma imagem histopatológica indica um tumor 
+    **Benigno** ou **Maligno**.
     """)
 
+    # 1. Carregar o modelo
     interpreter = carrega_modelo()
     
+    # 2. Carregar e Pré-processar a imagem (com a correção)
     image_para_modelo = carrega_e_prepara_imagem(interpreter)
 
+    # 3. Fazer a previsão se a imagem foi carregada
     if image_para_modelo is not None: 
         previsao(interpreter, image_para_modelo)
 
-# --- 5. Ponto de Entrada (Corrigido) ---
+# --- 5. Ponto de Entrada ---
 if __name__ == "__main__":
     main()
